@@ -1,0 +1,309 @@
+---
+title: "Technical Exercise - Part I"
+author: "Yong Zhao"
+date: "February 23, 2018"
+output: html_document
+subtitle: Difference of Life Expectancy between Females and Males
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Summary of Approaches
+
+The target of this project is to study the difference of life expectancy between females and males over the world. The life expectancy data are acquired from the [World Bank API](https://datahelpdesk.worldbank.org/knowledgebase/topics/125589-developer-information) using the R API client `httr`. The obtained data contain three columns of importance: country/country group names, year at birth, and life expectancy. There are missing values in the life expectancy data. For all the country group labels, the life expectancy values are only missing for birth year 2016 and 2017. These entries with missing values are dropped as they are not likely to influence the entire trend. Life expectancy difference is then calculated by subtracting males' life expectancy from females'. Following data wrangling and preprocessing, the difference of life expectancy is plotted against the years of birth by different [country groups](https://datahelpdesk.worldbank.org/knowledgebase/articles/906519-world-bank-country-and-lending-groups), using `shiny` and `plotly` interactive plots.
+
+```{r, processing, include = FALSE}
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(plotly)
+library(DT)
+library(scales)
+library(tseries)
+library(shiny)
+
+
+
+# URL (endpoint) = http://api.worldbank.org/v2/countries/all/indicators/
+# Indicator: SP.DYN.LE00.MA.IN, SP.DYN.LE00.FE.IN
+# parameter: format, date, page
+
+
+
+# Load life expectance data for females from 1960 to 2018
+resp = GET("http://api.worldbank.org/v2/countries/all/indicators/SP.DYN.LE00.FE.IN", 
+           query = list(format = "json", date = "1960:2018", page = 1))
+
+# Get the content of the response
+text_content = content(resp, as = "text", encoding = "UTF-8")
+
+# Parse with jsonlite
+json_content = text_content %>% fromJSON
+tot_pages = json_content[[1]]$pages
+result = json_content[[2]]
+
+# Create data frame df_LE_female
+df_LE_female = data.frame(cbind(result$indicator, result$country, result %>% select(countryiso3code : decimal)))
+colnames(df_LE_female) = c("indicator_id", "indicator_value", "country_id", "country_value", names(result)[3: length(names(result))])
+
+# Read pages up to the total page number
+for (page in seq(2, tot_pages)) {
+  resp = GET("http://api.worldbank.org/v2/countries/all/indicators/SP.DYN.LE00.FE.IN", 
+             query = list(format = "json", date = "1960:2018", page = page)) %>%
+    stop_for_status()
+  text_content = content(resp, as = "text", encoding = "UTF-8")
+  json_content = text_content %>% fromJSON
+  result = json_content[[2]]
+  df_temp = data.frame(cbind(result$indicator, result$country, result %>% select(countryiso3code : decimal)))
+  colnames(df_temp) = c("indicator_id", "indicator_value", "country_id", "country_value", names(result)[3: length(names(result))])
+  df_LE_female = rbind(df_LE_female, df_temp)
+  
+}
+
+
+# Load life expectance data for males
+resp = GET("http://api.worldbank.org/v2/countries/all/indicators/SP.DYN.LE00.MA.IN", 
+               query = list(format = "json", date = "1960:2018", page = 1))
+
+# Get the content of the response
+text_content = content(resp, as = "text", encoding = "UTF-8")
+
+# Parse with jsonlite
+json_content = text_content %>% fromJSON
+tot_pages = json_content[[1]]$pages
+result = json_content[[2]]
+
+# Create data frame df_LE_male
+df_LE_male = data.frame(cbind(result$indicator, result$country, result %>% select(countryiso3code : decimal)))
+colnames(df_LE_male) = c("indicator_id", "indicator_value", "country_id", "country_value", names(result)[3: length(names(result))])
+
+# Read pages up to the total page number
+for (page in seq(2, tot_pages)) {
+  resp = GET("http://api.worldbank.org/v2/countries/all/indicators/SP.DYN.LE00.MA.IN", 
+           query = list(format = "json", date = "1960:2018", page = page)) %>%
+    stop_for_status()
+  text_content = content(resp, as = "text", encoding = "UTF-8")
+  json_content = text_content %>% fromJSON
+  result = json_content[[2]]
+  df_temp = data.frame(cbind(result$indicator, result$country, result %>% select(countryiso3code : decimal)))
+  colnames(df_temp) = c("indicator_id", "indicator_value", "country_id", "country_value", names(result)[3: length(names(result))])
+  df_LE_male = rbind(df_LE_male, df_temp)
+
+}
+
+dim(df_LE_female)
+dim(df_LE_male)
+
+
+# -------------------------------
+# Data processing. 
+
+# Missing values as NA: 
+sapply(df_LE_female, function(x) sum(is.na(x)))
+sapply(df_LE_male, function(x) sum(is.na(x)))
+
+# Missing values as empty strings ''. 
+sapply(df_LE_female, function(x) sum(x == ""))
+sapply(df_LE_male, function(x) sum(x == ""))
+
+# Column "decimal" has all zeros
+unique(df_LE_female$decimal)
+unique(df_LE_male$decimal)
+
+# Drop columns "indicator_id", "unit", "obs_status", "decimal"
+
+df_LE_female = df_LE_female[! names(df_LE_female) %in% c("indicator_id", "unit", "obs_status", "decimal")]
+df_LE_male = df_LE_male[! names(df_LE_male) %in% c("indicator_id", "unit", "obs_status", "decimal")]
+
+df_LE_female = rename(df_LE_female, LE_female = value)
+df_LE_male = rename(df_LE_male, LE_male = value)
+# Merge the male and female life expectancy data frames into one data frame. 
+df_LE = merge(df_LE_female[names(df_LE_female)[-1]], df_LE_male[names(df_LE_male)[-1]], 
+      by = c('country_id', 'country_value', 'countryiso3code', 'date'), sort = FALSE)
+
+dim(df_LE)
+head(df_LE)
+
+# Create a new column for the difference of life expectancy between females and males. 
+df_LE$LE_diff = df_LE$LE_female - df_LE$LE_male
+
+# Set the dates as numeric. 
+df_LE$date = as.numeric(df_LE$date)
+
+
+# Exploratory Analysis. 
+# Check for NAs and empty strings
+sapply(df_LE, function(x) sum(is.na(x)))
+sapply(df_LE, function(x) sum(x == ''))
+
+# Found that the first 1 - 46 rows correspond to different aggregated country groups. 
+unique(df_LE$country_value)
+
+# See if there are missing LE values in years other than 2016 and 2017 for country groups.
+# Filters the country value by country groups, if missing values not in 2016, 2017 see what countries they are. 
+df_LE %>%
+  filter(is.na(.$LE_female), country_value %in% unique(df_LE$country_value)[1:46], ! date %in% c(2016, 2017)) %>%
+  select(country_value) %>%
+  unique()
+# only "Not classified" countries have missing values in years before 2016.  Drop "Not classified"
+df_LE = df_LE %>% filter(country_value != "Not classified")
+
+# The following verifes that life expectancy is a It turns out thatll missing for year 2016 and 2017 for all groups (46 * 2 = 92 rows)
+sapply(df_LE %>% filter(country_value %in% unique(df_LE$country_value)[1:46], date %in% c(2016, 2017)), function(x) sum(is.na(x)))
+dim(df_LE %>% filter(country_value %in% unique(df_LE$country_value)[1:46], date %in% c(2016, 2017)))
+
+# Create the data frame using the first 46 rows in df_LE (groups). Delete the rows of year 2016 and year 2017
+df_LE_group = df_LE %>% filter(country_value %in% unique(df_LE$country_value)[1:46], ! date %in% c(2016, 2017))
+
+# Check NAs in the new data frame (no missing)
+sapply(df_LE_group, function(x) sum(is.na(x)))
+
+# The dataset of df_LE_group has a colunmn of "date" that list the Year of Birth for each country group. 
+# The dateset is in long format, try to convert it into wide format by spreading the years and life expectancy difference into each column. 
+
+df_LE_Diff = df_LE_group %>% 
+  select(-c(LE_female, LE_male)) %>%
+  spread(date, LE_diff, fill = NA, convert = F)
+
+
+# Create a time series object ts(). Year 2016 and Year 2017 are filtered out to remove NAs. 
+
+# Calculate the Trend of Change in Gender Life Expectancy Difference by years over different country groups.  
+trend = c()
+for (i in df_LE_Diff$country_value) {
+  
+# Create a timeseries object for each country group. 
+
+  ts_LE = 
+    df_LE_Diff %>%
+      filter(country_value == i) %>%
+      select(`1960`:`2015`) %>% 
+      unname() %>% unlist() %>%
+      ts(frequency = 1, start = 1960, end = 2015)
+
+# Correlation Test if an overall trend of life expectancy difference over years exists in each country group 
+# If p value < 0.05, the null hypothesis of no correlation (no trend) with time is rejected.  
+  cor_test = cor.test(ts_LE, seq(1960, 2015))
+
+  if (cor_test$p.value > 0.05) {
+    trend = c(trend, "No overall trend")
+  } else if (cor_test$estimate >= 0) {
+    trend = c(trend, "Positive trend")
+  } else {
+    trend = c(trend, "Negative trend")
+  }
+    
+}    
+df_LE_Diff$Trend = trend
+
+
+```
+
+
+
+```{r, plotting, echo=FALSE}
+
+# The following code is used to generate a static html report. 
+dataset = df_LE_Diff %>% filter(country_value == "World")
+
+p = plot_ly(x=seq(1960, 2015), y=unlist(unname(dataset %>% select(`1960`:`2015`))),
+            type = "scatter", name = "World", mode = "lines+markers", text = dataset$Trend, visible = TRUE)
+
+for (i in c("High income", "Low income", "Lower middle income", "Upper middle income")) {
+
+        dataset = df_LE_Diff %>% filter(country_value == i)
+
+        p = p %>% add_trace(y = unlist(unname(dataset %>% select(`1960`:`2015`))),
+                            type = "scatter", name = i, mode = 'lines+markers', text = dataset$Trend, visible = TRUE)
+
+  }
+
+dataset = df_LE_Diff %>% filter(country_value == "Middle East & North Africa")
+p = p %>% add_trace(y = unlist(unname(dataset %>% select(`1960`:`2015`))),
+            type = "scatter", name = "Middle East & North Africa", mode = 'lines+markers', 
+            text = dataset$Trend, visible = "legendonly")
+
+      p %>% layout(title = "<b>Life Expectancy Difference between Females and Males</b>",
+                   autosize = TRUE, legend = list(orientation = 'h', y = -0.2),
+                   xaxis = list(title = "<b>Year of Birth</b>"),
+                   yaxis = list(title = "<b>Life Expectancy Difference<b>"))
+
+
+# Interactive plots through Shiny is not avaiable in static html reports. The following code generates an interactive ShinyApp page.
+
+# BY_REGION = c("East Asia & Pacific", "Europe & Central Asia", "Latin America & Caribbean", 
+#               "Middle East & North Africa", "South Asia", "Sub-Saharan Africa", "North America")
+# BY_INCOME = c("High income", "Low income", "Lower middle income", "Upper middle income")
+# WORLD = "World"
+# 
+# Country_Group = list(BY_REGION = c("East Asia & Pacific", "Europe & Central Asia", "Latin America & Caribbean", 
+#                                    "Middle East & North Africa", "South Asia", "Sub-Saharan Africa", "North America"), 
+#                      BY_INCOME = c("High income", "Low income", "Lower middle income", "Upper middle income"),
+#                      WORLD = "World")
+# 
+# ui = fluidPage(
+#   
+#   sidebarLayout(
+#     
+#   sidebarPanel(
+#     checkboxGroupInput("group", label = "Select Country Group:",
+#                        choices = c("BY_REGION", "BY_INCOME","WORLD"),
+#                        selected = "BY_INCOME", inline = F), width = 2), 
+#      
+#   mainPanel(
+#     plotlyOutput("trendPlot"), width = 10
+#     ), 
+#   
+#   position = "right", 
+#   
+#   fluid = T
+#   )
+# )
+# 
+# server <- function(input, output) {
+# 
+#   
+#   # vars_sel = unlist(unname(Country_Group[input$group]))
+#   vars_sel = reactive({unlist(unname(Country_Group[input$group]))})
+# 
+#   output$trendPlot <- renderPlotly({
+#     
+#       dataset = reactive({df_LE_Diff %>% filter(country_value == vars_sel()[1])})
+#       
+#       p = plot_ly(x=seq(1960, 2015), y=unlist(unname(dataset() %>% select(`1960`:`2015`))), 
+#                  type = "scatter", name = vars_sel()[1], mode = "lines+markers", text = dataset()$Trend) 
+#       
+#       for (i in vars_sel()[-1]) {
+# 
+#         dataset = reactive({df_LE_Diff %>% filter(country_value == i) })
+# 
+#         p = p %>% add_trace(y = unlist(unname(dataset() %>% select(`1960`:`2015`))), 
+#                             type = "scatter", name = i, mode = 'lines+markers', text = dataset()$Trend)
+# 
+#       }
+#       
+#       p %>% layout(title = "<b>Life Expectancy Difference between Females and Males</b>", 
+#                    autosize = TRUE, legend = list(orientation = 'h', y = -0.2), 
+#                    xaxis = list(title = "<b>Year of Birth</b>"), 
+#                    yaxis = list(title = "<b>Life Expectancy Difference<b>"))
+# 
+#   })
+# 
+#   
+#   
+# }
+# 
+# shinyApp(ui, server)
+
+```
+
+## Summary of Findings
+
+The figure above plots the difference of life expectancy between females and males for different country groups from year 1960 to 2015. Individual countries are not analyzed as this analysis attempts to generate an overall trend. Clicking the legend can select/deselect each individual country group. Hovering on each data point shows a label that contains the year (x) and life expectancy difference (y) as well as a comment of the overall trend for that country group. Whether an overall trend exists is tested using correlation (`cor.test`) between life expectancy difference and birth year at level of significance of 0.05. 
+
+The gender difference of life expectancy of the world shows an overall positive trend, suggesting that the life expectancy difference between females and males gets slightly larger over the years. However, if looking into different country groups, the gender difference and the trend apparently vary by the income groups. Firstly, higher income countries tend to have higher life expectancy difference between females and males. A possible explanation is that in a high-income society with better living conditions, women tend to better utilize social resources to benefit their health, while men are more inclined to risky activities and unhealthy habits such as drinking and smoking. The lower-income country groups show a smaller gender gap in life expectancy, possibly because the hardship of live condition constrains women's ability in seeking better health [(Ref)](https://www.scientificamerican.com/article/why-is-life-expectancy-lo/). Secondly, over the years, the changing trend of this gender gap is different from income groups. The low income countries barely showed any changes until recent years, with this gender difference getting slightly larger. The lower middle income countries show a strong increase in this gap, possibly due to the improving economic conditions of these countries over the years. Interestingly, the high income counties, whose life expectancy difference increasing over the years until 1980s, start to see a drop of this difference in the recent 30 years, resulting in an overall negative trend. This may be attributed to the promotion of healthier lifestyle for both men and women in the developed countries. In addition, social instability and warfare can be another factor that drives the life expectancy gender difference. In the Middle East and North Africa region, an abnormal peak of life expectancy difference is noted during the 1980s. This may be related to the long period of social upheaval in this region. 
+
